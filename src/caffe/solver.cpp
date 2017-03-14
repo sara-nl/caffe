@@ -332,10 +332,11 @@ void Solver<Dtype>::Step(int iters) {
         }
       }
 
+
 #ifdef CAFFE_PER_LAYER_TIMINGS
-      PrintTimers(false);
+      PrintTimers(true);
       ResetTimers();
-//      MLSL::print_mlsl_time();
+      MLSL::print_mlsl_time();
 #endif
     }
 
