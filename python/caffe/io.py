@@ -117,7 +117,7 @@ def array_to_datum(arr, label=None):
     if arr.dtype == np.uint8:
         datum.data = arr.tostring()
     else:
-        datum.float_data.extend(arr.flat)
+        datum.float_data.extend(arr.astype(float).flat)
     if label is not None:
         datum.label = label
     return datum
@@ -155,6 +155,7 @@ class Transformer:
         self.raw_scale = {}
         self.mean = {}
         self.input_scale = {}
+        self.is_flow = {}
 
     def __check_input(self, in_):
         if in_ not in self.inputs:
@@ -303,7 +304,7 @@ class Transformer:
                 m_min, m_max = mean.min(), mean.max()
                 normal_mean = (mean - m_min) / (m_max - m_min)
                 mean = resize_image(normal_mean.transpose((1,2,0)),in_shape[1:]).transpose((2,0,1)) * (m_max - m_min) + m_min
-                #aise ValueError('Mean shape incompatible with input shape.')
+                #raise ValueError('Mean shape incompatible with input shape.')
         self.mean[in_] = mean
 
     def set_input_scale(self, in_, scale):
@@ -320,6 +321,16 @@ class Transformer:
         self.__check_input(in_)
         self.input_scale[in_] = scale
 
+    def set_is_flow(self, in_, is_flow):
+        """
+        Indicate if input is a flow image
+
+        Take
+        in_: which input to assign this scale factor
+        is_flow: boolean indicating if the input is a flow image
+        """
+        self.__check_input(in_)
+        self.is_flow[in_] = is_flow
 
 ## Image IO
 
@@ -386,7 +397,7 @@ def resize_image(im, new_dims, interp_order=1):
             # skimage is fast but only understands {1,3} channel images
             # in [0, 1].
             im_std = (im - im_min) / (im_max - im_min)
-            resized_std = resize(im_std, new_dims, order=interp_order)
+            resized_std = resize(im_std, new_dims, order=interp_order, mode='constant')
             resized_im = resized_std * (im_max - im_min) + im_min
         else:
             # the image is a constant -- avoid divide by 0
@@ -397,7 +408,7 @@ def resize_image(im, new_dims, interp_order=1):
     else:
         # ndimage interpolates anything but more slowly.
         scale = tuple(np.array(new_dims, dtype=float) / np.array(im.shape[:2]))
-        resized_im = zoom(im, scale + (1,), order=interp_order)
+        resized_im = zoom(im, scale + (1,), order=interp_order, mode='constant')
     return resized_im.astype(np.float32)
 
 

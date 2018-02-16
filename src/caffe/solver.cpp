@@ -55,9 +55,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "caffe/util/upgrade_proto.hpp"
 
 #ifdef USE_MLSL
-#include <mlsl.h>
-#include <mpi.h>
-#endif /* USE_MLSL */
+#include "caffe/multinode/mlsl.hpp"
+#endif
 
 namespace caffe {
 
@@ -124,9 +123,6 @@ void Solver<Dtype>::Init(const SolverParameter& param) {
   iter_ = 0;
   current_step_ = 0;
 
-#ifdef CAFFE_PER_LAYER_TIMINGS
-  InitTimers();
-#endif
 }
 
 template <typename Dtype>
@@ -303,7 +299,7 @@ void Solver<Dtype>::Step(int iters) {
     net_->set_debug_info(display && param_.debug_info());
 
     Timer iter_timer;
-    double iter_time = 0;
+    double iter_time = 0.0;
     iter_timer.Start();
 
     Dtype loss = forward_backward_();
@@ -322,7 +318,12 @@ void Solver<Dtype>::Step(int iters) {
         const string& output_name =
             net_->blob_names()[net_->output_blob_indices()[j]];
         const Dtype loss_weight =
-            net_->blob_loss_weights()[net_->output_blob_indices()[j]];
+            net_->blob_loss_weights()[net_->output_blob_indices()[j]]
+#ifdef USE_MLSL
+            * mn::get_distrib()->get_data_parts()
+#endif
+              ;
+
         for (int k = 0; k < result[j]->count(); ++k) {
           ostringstream loss_msg_stream;
           if (loss_weight) {
@@ -334,13 +335,6 @@ void Solver<Dtype>::Step(int iters) {
               << result_vec[k] << loss_msg_stream.str();
         }
       }
-
-
-#ifdef CAFFE_PER_LAYER_TIMINGS
-      PrintTimers(true);
-      ResetTimers();
-      MLSL::print_mlsl_time();
-#endif
     }
 
     iter_timer.Start();
@@ -352,12 +346,20 @@ void Solver<Dtype>::Step(int iters) {
       PERFORMANCE_MEASUREMENT_BEGIN();
       ApplyUpdate();
       PERFORMANCE_MEASUREMENT_END_STATIC("weights_update");
+    }else{
+       //While using multinodes mode, force to print current lr to logs
+       PrintLearningRate();
     }
-
     iter_time += iter_timer.MilliSeconds();
 
 #ifdef CAFFE_PER_LAYER_TIMINGS
-    if (MLSL::GetNodeId() == 0)
+    net_->SaveTimeline();
+    net_->PrintTimers(false);
+    net_->ResetTimers();
+
+#ifdef USE_MLSL
+    if (mn::get_node_id() == 0)
+#endif
         LOG(INFO) << "iter " << iter_ << ", forward_backward_update_time: "
                 << iter_time << " ms";
 #endif
@@ -383,112 +385,11 @@ void Solver<Dtype>::Step(int iters) {
   }
 
 #ifdef CAFFE_PER_LAYER_TIMINGS
-  ResetTimers();
-  PrintTimers(true);
+  net_->ResetTimers();
+  net_->PrintTimers(true);
+  net_->PrintPayloadSize();
 #endif
 }
-
-#ifdef CAFFE_PER_LAYER_TIMINGS
-
-template <typename Dtype>
-void Solver<Dtype>::InitTimers() {
-  int layer_count = net_->layers().size();
-
-  this->forward_time_per_layer.resize(layer_count, 0.0);
-  this->backward_time_per_layer.resize(layer_count, 0.0);
-  this->update_time_per_layer.resize(layer_count, 0.0);
-
-  this->forward_time_per_layer_total.resize(layer_count, 0.0);
-  this->backward_time_per_layer_total.resize(layer_count, 0.0);
-  this->update_time_per_layer_total.resize(layer_count, 0.0);
-}
-
-template <typename Dtype>
-void Solver<Dtype>::ResetTimers() {
-  std::transform(this->forward_time_per_layer_total.begin(),
-                 this->forward_time_per_layer_total.end(),
-                 this->forward_time_per_layer.begin(),
-                 this->forward_time_per_layer_total.begin(),
-                 std::plus<int>());
-
-  std::transform(this->backward_time_per_layer_total.begin(),
-                 this->backward_time_per_layer_total.end(),
-                 this->backward_time_per_layer.begin(),
-                 this->backward_time_per_layer_total.begin(),
-                 std::plus<int>());
-
-  std::transform(this->update_time_per_layer_total.begin(),
-                 this->update_time_per_layer_total.end(),
-                 this->update_time_per_layer.begin(),
-                 this->update_time_per_layer_total.begin(),
-                 std::plus<int>());
-
-  std::fill(this->forward_time_per_layer.begin(),
-          this->forward_time_per_layer.end(), 0);
-  std::fill(this->backward_time_per_layer.begin(),
-          this->backward_time_per_layer.end(), 0);
-  std::fill(this->update_time_per_layer.begin(),
-          this->update_time_per_layer.end(), 0);
-}
-
-template <typename Dtype>
-void Solver<Dtype>::PrintTimers(bool printTotal) {
-#ifdef USE_MLSL
-    if (MLSL::GetNodeId())
-       return;
-#endif
-
-    LOG(WARNING) << std::endl;
-    LOG(WARNING) << "####################################################";
-
-    std::vector<double>& forward_timers = printTotal ?
-        forward_time_per_layer_total : forward_time_per_layer;
-    std::vector<double>& backward_timers = printTotal ?
-        backward_time_per_layer_total : backward_time_per_layer;
-    std::vector<double>& update_timers = printTotal ?
-        update_time_per_layer_total : update_time_per_layer;
-    std::string prefix = printTotal ? "TOTAL " : "DELTA ";
-
-    double forward_time = std::accumulate(forward_timers.begin(),
-            forward_timers.end(), 0) / 1000;
-    LOG(WARNING) << prefix << "FORWARD TIME: " << forward_time << " ms";
-    for (int layer_idx = 0; layer_idx < net_->layers().size(); layer_idx++) {
-        LOG(WARNING) << "LAYER-" << layer_idx << " "
-                     << net_->layers()[layer_idx]->type()
-                     << ": forward_time: " << forward_timers[layer_idx] / 1000
-                     << " ms";
-    }
-    LOG(WARNING) << std::endl;
-
-    double backward_time = std::accumulate(backward_timers.begin(),
-            backward_timers.end(), 0) / 1000;
-    LOG(WARNING) << prefix << "BACKWARD TIME: " << backward_time << " ms";
-    for (int layer_idx = 0; layer_idx < net_->layers().size(); layer_idx++) {
-        LOG(WARNING) << "LAYER-" << layer_idx << " "
-                     << net_->layers()[layer_idx]->type()
-                     << ": backward_time: " << backward_timers[layer_idx] / 1000
-                     << " ms";
-    }
-    LOG(WARNING) << std::endl;
-
-    double update_time = std::accumulate(update_timers.begin(),
-            update_timers.end(), 0) / 1000;
-    LOG(WARNING) << prefix << "UPDATE TIME: " << update_time << " ms";
-    for (int layer_idx = 0; layer_idx < net_->layers().size(); layer_idx++) {
-        LOG(WARNING) << "LAYER-" << layer_idx << " "
-                     << net_->layers()[layer_idx]->type()
-                     << ": update_time: " << update_timers[layer_idx] / 1000
-                     << " ms";
-    }
-    LOG(WARNING) << std::endl;
-
-    LOG(WARNING) << prefix << "TIME (F+B+U): " << (forward_time +
-            backward_time + update_time) / 1000 << " sec";
-    LOG(WARNING) << "####################################################";
-    LOG(WARNING) << std::endl;
-}
-
-#endif /* CAFFE_PER_LAYER_TIMINGS */
 
 template <typename Dtype>
 void Solver<Dtype>::Solve(const char* resume_file) {
@@ -535,17 +436,20 @@ void Solver<Dtype>::Solve(const char* resume_file) {
     LOG(INFO) << "Iteration " << iter_ << ", loss = " << smoothed_loss_;
   }
 
-#ifdef USE_MLSL
   // in multinode last test must be done after weights update
   if (param_.test_interval() && iter_ % param_.test_interval() == 0)
     TestAll();
-#endif
 
   LOG(INFO) << "Optimization Done.";
 }
 
 template <typename Dtype>
 void Solver<Dtype>::TestAll() {
+#ifdef USE_MLSL
+  for (int i = 0; i < callbacks_.size(); ++i) {
+    callbacks_[i]->on_before_test();
+  }
+#endif
   for (int test_net_id = 0;
        test_net_id < test_nets_.size() && !requested_early_exit_;
        ++test_net_id) {
@@ -557,6 +461,11 @@ void Solver<Dtype>::TestAll() {
       LOG(FATAL) << "Unknown evaluation type: " << param_.eval_type();
     }
   }
+#ifdef USE_MLSL
+  for (int i = 0; i < callbacks_.size(); ++i) {
+    callbacks_[i]->on_after_test();
+  }
+#endif
 }
 
 template <typename Dtype>
@@ -616,29 +525,34 @@ void Solver<Dtype>::TestClassification(const int test_net_id) {
   }
   if (param_.test_compute_loss()) {
 #ifdef USE_MLSL
-    MPI_Allreduce(MPI_IN_PLACE, &loss, 1, sizeof(Dtype) == 4 ?
-        MPI_FLOAT : MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    loss /= (param_.test_iter(test_net_id) * MLSL::GetNumNodes());
-    if (MLSL::GetNodeId() == 0) LOG(INFO) << "Test loss: " << loss;
+    mn::allreduce(&loss, 1);
+    loss /= (param_.test_iter(test_net_id) * mn::get_group_size());
+    if (mn::get_node_id() == 0) {
+      LOG(INFO) << "Test loss: " << loss;
+    }
 #else /* !USE_MLSL */
     loss /= param_.test_iter(test_net_id);
     LOG(INFO) << "Test loss: " << loss;
 #endif /* USE_MLSL */
   }
 #ifdef USE_MLSL
-  MPI_Allreduce(MPI_IN_PLACE, test_score.data(), test_score.size(),
-          sizeof(Dtype) == 4 ? MPI_FLOAT : MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  if (MLSL::GetNodeId() == 0)
+  mn::allreduce(test_score.data(), test_score.size());
+  if (mn::get_node_id() == 0)
 #endif /* USE_MLSL */
   for (int i = 0; i < test_score.size(); ++i) {
     const int output_blob_index =
         test_net->output_blob_indices()[test_score_output_id[i]];
     const string& output_name = test_net->blob_names()[output_blob_index];
-    const Dtype loss_weight = test_net->blob_loss_weights()[output_blob_index];
+    const Dtype loss_weight = test_net->blob_loss_weights()[output_blob_index]
+#ifdef USE_MLSL
+      * mn::get_distrib()->get_data_parts()
+#endif
+      ;
+
     ostringstream loss_msg_stream;
 #ifdef USE_MLSL
     const Dtype mean_score =
-      test_score[i] / (param_.test_iter(test_net_id) * MLSL::GetNumNodes());
+      test_score[i] / (param_.test_iter(test_net_id) * mn::get_group_size());
 #else /* !USE_MLSL */
     const Dtype mean_score = test_score[i] / param_.test_iter(test_net_id);
 #endif /* USE_MLSL */
@@ -719,9 +633,18 @@ void Solver<Dtype>::TestDetection(const int test_net_id) {
     return;
   }
   if (param_.test_compute_loss()) {
-    loss /= param_.test_iter(test_net_id);
-    LOG(INFO) << "Test loss: " << loss;
+#ifdef USE_MLSL
+      mn::allreduce(&loss, 1);
+      loss /= (param_.test_iter(test_net_id) * mn::get_group_size());
+      if (mn::get_node_id() == 0) {
+          LOG(INFO) << "Test loss: " << loss;
+      }
+#else /* !USE_MLSL */
+      loss /= param_.test_iter(test_net_id);
+      LOG(INFO) << "Test loss: " << loss;
+#endif /* USE_MLSL */
   }
+
   for (int i = 0; i < all_true_pos.size(); ++i) {
     if (all_true_pos.find(i) == all_true_pos.end()) {
       LOG(FATAL) << "Missing output_blob true_pos: " << i;
@@ -761,7 +684,17 @@ void Solver<Dtype>::TestDetection(const int test_net_id) {
                 param_.ap_version(), &prec, &rec, &(APs[label]));
       mAP += APs[label];
     }
+#ifdef USE_MLSL
+    Dtype allnodes_mAP = static_cast<Dtype>(mAP);
+    mn::allreduce(&allnodes_mAP, 1);
+    mAP = allnodes_mAP;
+    Dtype allnodes_num_pos = static_cast<Dtype>(num_pos.size());
+    mn::allreduce(&allnodes_num_pos, 1);
+    if (mn::get_node_id() == 0)
+        mAP /= allnodes_num_pos;
+#else /* USE_MLSL */
     mAP /= num_pos.size();
+#endif
     const int output_blob_index = test_net->output_blob_indices()[i];
     const string& output_name = test_net->blob_names()[output_blob_index];
     LOG(INFO) << "    Test net output #" << i << ": " << output_name << " = "
@@ -771,12 +704,14 @@ void Solver<Dtype>::TestDetection(const int test_net_id) {
 
 template <typename Dtype>
 void Solver<Dtype>::Snapshot() {
+  LOG(INFO)<<"Snapshot begin";
   CHECK(Caffe::root_solver());
 
 #ifdef USE_MLSL
-  if (MLSL::GetNodeId() != 0) return;
+  for (int i = 0; i < callbacks_.size(); ++i) {
+    callbacks_[i]->on_before_snapshot();
+  }
 #endif /* USE_MLSL */
-
   string model_filename;
   switch (param_.snapshot_format()) {
   case caffe::SolverParameter_SnapshotFormat_BINARYPROTO:
@@ -790,6 +725,13 @@ void Solver<Dtype>::Snapshot() {
   }
 
   SnapshotSolverState(model_filename);
+
+#ifdef USE_MLSL
+  for (int i = 0; i < callbacks_.size(); ++i) {
+    callbacks_[i]->on_after_snapshot();
+  }
+#endif
+  LOG(INFO)<<"Snapshot end";
 }
 
 template <typename Dtype>
@@ -819,17 +761,29 @@ string Solver<Dtype>::SnapshotFilename(const string extension) {
 template <typename Dtype>
 string Solver<Dtype>::SnapshotToBinaryProto() {
   string model_filename = SnapshotFilename(".caffemodel");
-  LOG(INFO) << "Snapshotting to binary proto file " << model_filename;
   NetParameter net_param;
   net_->ToProto(&net_param, param_.snapshot_diff());
+#ifdef USE_MLSL
+  if (mn::is_root()) {
+#endif
+  LOG(INFO) << "Snapshotting to binary proto file " << model_filename;
   WriteProtoToBinaryFile(net_param, model_filename);
+#ifdef USE_MLSL
+  }
+#endif
   return model_filename;
 }
 
 template <typename Dtype>
 string Solver<Dtype>::SnapshotToHDF5() {
   string model_filename = SnapshotFilename(".caffemodel.h5");
+#ifdef USE_MLSL
+  if (mn::is_root()) {
+#endif
   LOG(INFO) << "Snapshotting to HDF5 file " << model_filename;
+#ifdef USE_MLSL
+  }
+#endif
   net_->ToHDF5(model_filename, param_.snapshot_diff());
   return model_filename;
 }
@@ -849,6 +803,10 @@ void Solver<Dtype>::Restore(const char* state_file) {
 template <typename Dtype>
 void Solver<Dtype>::UpdateSmoothedLoss(Dtype loss, int start_iter,
     int average_loss) {
+#ifdef USE_MLSL
+  loss *= mn::get_distrib()->get_data_parts();
+#endif
+
   if (losses_.size() < average_loss) {
     losses_.push_back(loss);
     int size = losses_.size();

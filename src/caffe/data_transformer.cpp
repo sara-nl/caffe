@@ -48,7 +48,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "caffe/util/im_transforms.hpp"
 #include "caffe/util/io.hpp"
 
-
 namespace caffe {
 
 template<typename Dtype>
@@ -84,17 +83,106 @@ DataTransformer<Dtype>::DataTransformer(const TransformationParameter& param,
   }
 }
 
+template<typename Dtype>
+void DataTransformer<Dtype>::Transform(const Datum& datum, Dtype* transformed_data) {
+  const string& data = datum.data();
+  const int datum_channels = datum.channels();
+  const int datum_height = datum.height();
+  const int datum_width = datum.width();
+
+  const int crop_size = param_.crop_size();
+  const Dtype scale = param_.scale();
+  const bool do_mirror = param_.mirror() && rand_num_(2);
+  const bool has_mean_file = param_.has_mean_file();
+  const bool has_uint8 = data.size() > 0;
+  const bool has_mean_values = mean_values_.size() > 0;
+  const bool flow = param_.flow();
+
+  CHECK_GT(datum_channels, 0);
+  CHECK_GE(datum_height, crop_size);
+  CHECK_GE(datum_width, crop_size);
+
+  Dtype* mean = NULL;
+  if (has_mean_file) {
+    CHECK_EQ(datum_channels, data_mean_.channels());
+    CHECK_EQ(datum_height, data_mean_.height());
+    CHECK_EQ(datum_width, data_mean_.width());
+    mean = data_mean_.mutable_cpu_data();
+  }
+  if (has_mean_values) {
+    CHECK(mean_values_.size() == 1 || mean_values_.size() == datum_channels) <<
+     "Specify either 1 mean_value or as many as channels: " << datum_channels;
+    if (datum_channels > 1 && mean_values_.size() == 1) {
+      // Replicate the mean_value for simplicity
+      for (int c = 1; c < datum_channels; ++c) {
+        mean_values_.push_back(mean_values_[0]);
+      }
+    }
+  }
+
+  int height = datum_height;
+  int width = datum_width;
+
+  int h_off = 0;
+  int w_off = 0;
+  if (crop_size) {
+    height = crop_size;
+    width = crop_size;
+    // We only do random crop when we do training.
+    if (phase_ == TRAIN) {
+      h_off = rand_num_(datum_height - crop_size + 1);
+      w_off = rand_num_(datum_width - crop_size + 1);
+    } else {
+      h_off = (datum_height - crop_size) / 2;
+      w_off = (datum_width - crop_size) / 2;
+    }
+  }
+
+  Dtype datum_element;
+  int top_index, data_index;
+  for (int c = 0; c < datum_channels; ++c) {
+    for (int h = 0; h < height; ++h) {
+      for (int w = 0; w < width; ++w) {
+        data_index = (c * datum_height + h_off + h) * datum_width + w_off + w;
+        if (do_mirror) {
+          top_index = (c * height + h) * width + (width - 1 - w);
+        } else {
+          top_index = (c * height + h) * width + w;
+        }
+        if (has_uint8) {
+          datum_element =
+            static_cast<Dtype>(static_cast<uint8_t>(data[data_index]));
+          if (flow && c == 2 && do_mirror) {
+            datum_element = 255-datum_element;
+          }
+        } else {
+          datum_element = datum.float_data(data_index);
+          if (flow && c == 2 && do_mirror) {
+            datum_element = 255-datum_element;
+          }
+        }
+        if (has_mean_file) {
+          transformed_data[top_index] =
+            (datum_element - mean[data_index]) * scale;
+        } else {
+          if (has_mean_values) {
+            transformed_data[top_index] =
+              (datum_element - mean_values_[c]) * scale;
+          } else {
+            transformed_data[top_index] = datum_element * scale;
+          }
+        }
+      }
+    }
+  }
+}
 
 template<typename Dtype>
-void DataTransformer<Dtype>::Transform(const Datum& datum,
-                         Dtype* transformed_data, 
-                         NormalizedBBox* crop_bbox, RandNumbers& rand_num) {
-  const bool do_mirror = param_.mirror() && rand_num(2);
-  const string& data = datum.data();
-  const bool has_uint8 = data.size() > 0;
-  const bool has_mean_file = param_.has_mean_file();
-  const bool has_mean_values = mean_values_.size() > 0;
-
+void DataTransformer<Dtype>::Transform(const Datum& datum, Dtype* transformed_data,
+                                       NormalizedBBox* crop_bbox, RandNumbers& rand_num,
+                                       const bool do_mirror, const bool has_uint8,
+                                       const bool has_mean_file, const bool has_mean_values)
+{
   int transform_func_id = (do_mirror << 2) +
                           (has_mean_file << 1) +
                           has_mean_values;
@@ -140,17 +228,69 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
   }
 }
 
+namespace {
+  // Based on the path we're in (detection or classification), perform transformations on
+  // annotations.
+  template<typename AnnotationHandler>
+  void call_annotation_handler(AnnotationHandler& anno_handler, const bool do_resize, const bool do_mirror)
+  {
+    anno_handler(do_resize, do_mirror);
+  }
+
+  template<>
+  void call_annotation_handler<EmptyType>(EmptyType&, const bool, const bool)
+  {
+  }
+}
+
 template<typename Dtype>
-template<bool has_uint8, bool do_mirror, bool has_mean_file,
-  bool has_mean_values>
+template<typename AnnotationHandler>
 void DataTransformer<Dtype>::Transform(const Datum& datum,
                                        Dtype* transformed_data,
                                        NormalizedBBox* crop_bbox,
-                                       RandNumbers& rand_num) {
+                                       RandNumbers& rand_num,
+                                       AnnotationHandler anno_handler)
+{
+  const bool do_mirror = param_.mirror() && rand_num(2);
   const string& data = datum.data();
-  const int datum_channels = datum.channels();
-  const int datum_height = datum.height();
-  const int datum_width = datum.width();
+  const bool has_uint8 = data.size() > 0;
+  const bool has_mean_file = param_.has_mean_file();
+  const bool has_mean_values = mean_values_.size() > 0;
+
+  Transform(datum, transformed_data, crop_bbox, rand_num,
+            do_mirror, has_uint8, has_mean_file, has_mean_values);
+
+  call_annotation_handler(anno_handler, /* do_resize */ true, do_mirror);
+}
+
+template<typename Dtype>
+template<bool has_uint8, bool do_mirror, bool has_mean_file,
+  bool has_mean_values>
+void DataTransformer<Dtype>::Transform(const Datum& datum_in,
+                                       Dtype* transformed_data,
+                                       NormalizedBBox* crop_bbox,
+                                       RandNumbers& rand_num) {
+  const Datum *datum = &datum_in;
+  Datum resized_datum;
+  if (param_.has_random_resize_param()) {
+#ifdef USE_OPENCV
+    RandomResizeImage(datum_in, &resized_datum);
+    datum = &resized_datum;
+#else
+    LOG(FATAL) << "Random image resizing requires OpenCV; compile with USE_OPENCV.";
+#endif
+  } else if (param_.has_random_aspect_ratio_param()) {
+#ifdef USE_OPENCV
+    RandomAlterAspectRatio(datum_in, &resized_datum);
+    datum = &resized_datum;
+#else
+    LOG(FATAL) << "Aspect ratio changes require OpenCV; compile with USE_OPENCV.";
+#endif
+  }
+  const string& data = datum->data();
+  const int datum_channels = datum->channels();
+  const int datum_height = datum->height();
+  const int datum_width = datum->width();
 
   const int crop_size = param_.crop_size();
   const Dtype scale = param_.scale();
@@ -216,7 +356,7 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
           datum_element =
             static_cast<Dtype>(static_cast<uint8_t>(data[data_index]));
         } else {
-          datum_element = datum.float_data(data_index);
+          datum_element = datum->float_data(data_index);
         }
         if (has_mean_file) {
           transformed_data[top_index] =
@@ -235,8 +375,8 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
 }
 
 template<typename Dtype>
-void DataTransformer<Dtype>::GenerateRandNumbers(PreclcRandomNumbers& rn) {
-  int count = (param_.mirror()? 1:0) +
+void DataTransformer<Dtype>::GenerateRandNumbers(PreclcRandomNumbers& rn, bool sample_bboxes) {
+  int count = (sample_bboxes ? 1 : 0) + (param_.mirror()? 1:0) +
                   ((phase_ == TRAIN && param_.crop_size())? 2 : 0);
   rn.FillRandomNumbers(count, rand_num_);
 }
@@ -250,10 +390,13 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
 }
 
 template<typename Dtype>
+template<typename AnnotationHandler>
 void DataTransformer<Dtype>::Transform(const Datum& datum,
                                        Blob<Dtype>* transformed_blob,
                                        NormalizedBBox* crop_bbox,
-                                       RandNumbers& rand_num) {
+                                       RandNumbers& rand_num,
+                                       AnnotationHandler anno_handler)
+{
   // If datum is encoded, decoded and transform the cv::image.
   if (datum.encoded()) {
 #ifdef USE_OPENCV
@@ -267,7 +410,7 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
       cv_img = DecodeDatumToCVMatNative(datum);
     }
     // Transform the cv::image into blob.
-    return Transform(cv_img, transformed_blob, crop_bbox, rand_num);
+    return Transform(cv_img, transformed_blob, crop_bbox, rand_num, anno_handler);
 #else
     LOG(FATAL) << "Encoded datum requires OpenCV; compile with USE_OPENCV.";
 #endif  // USE_OPENCV
@@ -302,7 +445,7 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
   }
 
   Dtype* transformed_data = transformed_blob->mutable_cpu_data();
-  Transform(datum, transformed_data, crop_bbox, rand_num);
+  Transform(datum, transformed_data, crop_bbox, rand_num, anno_handler);
 }
 
 template<typename Dtype>
@@ -333,58 +476,50 @@ void DataTransformer<Dtype>::Transform(const vector<Datum> & datum_vector,
 }
 
 template<typename Dtype>
-void DataTransformer<Dtype>::Transform(const AnnotatedDatum& anno_datum, 
+void DataTransformer<Dtype>::Transform(const AnnotatedDatum& anno_datum,
                                        Blob<Dtype>* transformed_blob,
-                                       RepeatedPtrField<AnnotationGroup>* transformed_anno_group_all) {
+                                       RepeatedPtrField<AnnotationGroup>* transformed_anno_group_all,
+				       RandNumbers& rand_num) {
   // Transform datum.
   const Datum& datum = anno_datum.datum();
   NormalizedBBox crop_bbox;
-  Transform(datum, transformed_blob, &crop_bbox, rand_num_);
 
-  // Transform annotation.
-  const bool do_resize = true;
-  //LOG(INFO) << "Before do_mirror";
-  const bool do_mirror = param_.mirror() && rand_num_(2);
-  //LOG(INFO) << "After do_mirror";
-  TransformAnnotation(anno_datum, do_resize, crop_bbox, do_mirror,
-                      transformed_anno_group_all);
+  // We need to call TransformAnnotation after do_mirror is set, based on precalculated
+  // values from RNG. RNG generates only one value for do_mirror, so the variable
+  // can be set only once. Otherwise, RNG's queue will be empty.
+  auto transform_annotation = [&](const bool do_resize, const bool do_mirror) -> void {
+    TransformAnnotation(anno_datum, do_resize, crop_bbox, do_mirror,
+                        transformed_anno_group_all);
+  };
+
+  Transform(datum, transformed_blob, &crop_bbox, rand_num, transform_annotation);
 }
-/*
+
 template<typename Dtype>
-void DataTransformer<Dtype>::Transform(const AnnotatedDatum& anno_datum, 
+void DataTransformer<Dtype>::Transform(const AnnotatedDatum& anno_datum,
                                        Blob<Dtype>* transformed_blob,
-                                       RepeatedPtrField<AnnotationGroup>* transformed_anno_group_all,
-                                       RandNumbers& rand_num) {
-  bool do_mirror;
-  Transform(anno_datum, transformed_blob, transformed_anno_group_all,
-            &do_mirror, rand_num);
+                                       vector<AnnotationGroup>* transformed_anno_vec,
+				       RandNumbers& rand_num) {
+  RepeatedPtrField<AnnotationGroup> transformed_anno_group_all;
+  Transform(anno_datum, transformed_blob, &transformed_anno_group_all, rand_num);
+
+  for (int g = 0; g < transformed_anno_group_all.size(); ++g) {
+    transformed_anno_vec->push_back(transformed_anno_group_all.Get(g));
+  }
 }
-*/
 
 template<typename Dtype>
 void DataTransformer<Dtype>::Transform(const AnnotatedDatum& anno_datum, 
                                        Blob<Dtype>* transformed_blob,
                                        vector<AnnotationGroup>* transformed_anno_vec) {
-  RepeatedPtrField<AnnotationGroup> transformed_anno_group_all;
-  Transform(anno_datum, transformed_blob, &transformed_anno_group_all);
-  
-  for (int g = 0; g < transformed_anno_group_all.size(); ++g) {
-    transformed_anno_vec->push_back(transformed_anno_group_all.Get(g));
-  }
+  Transform(anno_datum, transformed_blob, transformed_anno_vec, rand_num_);
 }
-/*
+
 template<typename Dtype>
-void DataTransformer<Dtype>::Transform(const AnnotatedDatum& anno_datum, 
-                                       Blob<Dtype>* transformed_blob,
-                                       vector<AnnotationGroup>* transformed_anno_vec,
-                                       RandNumbers& rand_num) {
-  Transform(anno_datum, transformed_blob, transformed_anno_vec, rand_num);
-}
-*/
-template<typename Dtype>
-void DataTransformer<Dtype>::TransformAnnotation(const AnnotatedDatum& anno_datum, 
+//template<bool do_resize, bool do_mirror>
+void DataTransformer<Dtype>::TransformAnnotation(const AnnotatedDatum& anno_datum,
                                                  const bool do_resize,
-                                                 const NormalizedBBox& crop_bbox, 
+                                                 const NormalizedBBox& crop_bbox,
                                                  const bool do_mirror,
                                                  RepeatedPtrField<AnnotationGroup>* transformed_anno_group_all) {
   const int img_height = anno_datum.datum().height();
@@ -692,10 +827,13 @@ void DataTransformer<Dtype>::Transform(const vector<cv::Mat> & mat_vector,
 }
 
 template<typename Dtype>
+template<typename AnnotationHandler>
 void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
-                                       Blob<Dtype>* transformed_blob, 
-                                       NormalizedBBox* crop_bbox, 
-                                       RandNumbers& rand_num) {
+                                       Blob<Dtype>* transformed_blob,
+                                       NormalizedBBox* crop_bbox,
+                                       RandNumbers& rand_num,
+                                       AnnotationHandler anno_handler)
+{
   const bool do_mirror = param_.mirror() && rand_num(2);
   const bool has_mean_file = param_.has_mean_file();
   const bool has_mean_values = mean_values_.size() > 0;
@@ -722,14 +860,34 @@ void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
     case 7: Transform<true , true , true >(cv_img, transformed_blob, crop_bbox, rand_num);
       break;
   }
+
+  //  const bool do_resize = true;
+  call_annotation_handler(anno_handler, /* do_resize*/ true, do_mirror);
 }
 
 template<typename Dtype>
 template<bool do_mirror, bool has_mean_file, bool has_mean_values>
-void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
+void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img_in,
         Blob<Dtype>* transformed_blob, NormalizedBBox* crop_bbox, RandNumbers& rand_num) {
+  const cv::Mat *cv_img = &cv_img_in;
+  cv::Mat resized_img;
+  if (param_.has_random_resize_param()) {
+#ifdef USE_OPENCV
+    RandomResizeImage(cv_img_in, &resized_img);
+    cv_img = &resized_img;
+#else
+    LOG(FATAL) << "Random image resizing requires OpenCV; compile with USE_OPENCV.";
+#endif
+  } else if (param_.has_random_aspect_ratio_param()) {
+#ifdef USE_OPENCV
+    RandomAlterAspectRatio(cv_img_in, &resized_img);
+    cv_img = &resized_img;
+#else
+    LOG(FATAL) << "Aspect ratio changes require OpenCV; compile with USE_OPENCV.";
+#endif
+  }
   const int crop_size = param_.crop_size();
-  const int img_channels = cv_img.channels();
+  const int img_channels = cv_img->channels();
 
   // Check dimensions.
   const int channels = transformed_blob->channels();
@@ -740,7 +898,7 @@ void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
   CHECK_EQ(channels, img_channels);
   CHECK_GE(num, 1);
 
-  CHECK(cv_img.depth() == CV_8U) << "Image data type must be unsigned byte";
+  CHECK(cv_img->depth() == CV_8U) << "Image data type must be unsigned byte";
 
   const Dtype scale = param_.scale();
 
@@ -763,9 +921,9 @@ void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
   }
   cv::Mat cv_resized_img, cv_noised_img;
   if (param_.has_resize_param()) {
-    cv_resized_img = ApplyResize(cv_img, param_.resize_param());
+    cv_resized_img = ApplyResize(*cv_img, param_.resize_param());
   } else {
-    cv_resized_img = cv_img;
+    cv_resized_img = *cv_img;
   }
   if (param_.has_noise_param()) {
     cv_noised_img = ApplyNoise(cv_resized_img, param_.noise_param());
@@ -779,7 +937,7 @@ void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
 
   int h_off = 0;
   int w_off = 0;
-  cv::Mat cv_cropped_img = cv_img;
+  cv::Mat cv_cropped_img = *cv_img;
   if (crop_size) {
     CHECK_EQ(crop_size, height);
     CHECK_EQ(crop_size, width);
@@ -792,7 +950,7 @@ void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
       w_off = (img_width - crop_size) / 2;
     }
     cv::Rect roi(w_off, h_off, crop_size, crop_size);
-    cv_cropped_img = cv_img(roi);
+    cv_cropped_img = (*cv_img)(roi);
   } else {
     cv_cropped_img = cv_noised_img;
   }
@@ -1005,6 +1163,106 @@ void DataTransformer<Dtype>::ExpandImage(const cv::Mat& img,
   img.copyTo((*expand_img)(bbox_roi));
 }
 
+static cv::Mat ResizeImagePerShorterSize(const cv::Mat& img, int shorter_size, ResizeParameter resize_param) {
+  int h = img.size().height;
+  int w = img.size().width;
+  resize_param.set_height(shorter_size);
+  resize_param.set_width(shorter_size);
+  if (h < w) {
+    resize_param.set_width(int(float(w) / h * shorter_size));
+  } else {
+    resize_param.set_height(int(float(h) / w * shorter_size));
+  }
+  return ApplyResize(img, resize_param);
+}
+
+template<typename Dtype>
+void DataTransformer<Dtype>::RandomResizeImage(const Datum& datum, Datum *resized_datum) {
+  shared_ptr<cv::Mat> img;
+  if (datum.encoded()) {
+    img = shared_ptr<cv::Mat>(new cv::Mat(DecodeDatumToCVMatNative(datum)));
+  } else {
+    img = shared_ptr<cv::Mat>(new cv::Mat(
+                                cv::Size(datum.width(), datum.height()),
+                                CV_8UC(datum.channels()),
+                                (void*)datum.data().data()));
+  }
+  cv::Mat resized_img;
+  RandomResizeImage(*img, &resized_img);
+  CVMatToDatum(resized_img, resized_datum);
+}
+
+template<typename Dtype>
+void DataTransformer<Dtype>::RandomResizeImage(const cv::Mat& img, cv::Mat *resized_img) {
+  int h = img.size().height;
+  int w = img.size().width;
+  int min_size = param_.random_resize_param().min_size();
+  int max_size = param_.random_resize_param().max_size();
+  ResizeParameter resize_param = param_.random_resize_param().resize_param();
+  if (min_size == 0) min_size = std::min(h,w);
+  if (max_size == 0) max_size = std::max(h,w);
+  int shorter_size = rand_num_(max_size - min_size + 1) + min_size;
+  *resized_img = ResizeImagePerShorterSize(img, shorter_size, resize_param);
+}
+
+template<typename Dtype>
+void DataTransformer<Dtype>::RandomAlterAspectRatio(const Datum& datum, Datum *resized_datum) {
+  shared_ptr<cv::Mat> img;
+  if (datum.encoded()) {
+    img = shared_ptr<cv::Mat>(new cv::Mat(DecodeDatumToCVMatNative(datum)));
+  } else {
+    img = shared_ptr<cv::Mat>(new cv::Mat(
+                                cv::Size(datum.width(), datum.height()),
+                                CV_8UC(datum.channels()),
+                                (void*)datum.data().data()));
+  }
+  cv::Mat resized_img;
+  RandomAlterAspectRatio(*img, &resized_img);
+  CVMatToDatum(resized_img, resized_datum);
+}
+
+static float RandRatio(float min, float max, RandNumbers& rand_num) {
+  return (rand_num(int((max - min) * 1000 + 1)) + min * 1000) / 1000;
+}
+
+template<typename Dtype>
+void DataTransformer<Dtype>::RandomAlterAspectRatio(const cv::Mat& img, cv::Mat *resized_img) {
+  const int crop_size = param_.crop_size();
+  const int h = img.size().height;
+  const int w = img.size().width;
+  const float area = h * w;
+  const float min_area_ratio = param_.random_aspect_ratio_param().min_area_ratio();
+  const float max_area_ratio = param_.random_aspect_ratio_param().max_area_ratio();
+  const float min_aspect_ratio_change =
+    param_.random_aspect_ratio_param().aspect_ratio_change();
+  CHECK(crop_size > 0);
+  CHECK(max_area_ratio >= min_area_ratio);
+  ResizeParameter resize_param = param_.random_aspect_ratio_param().resize_param();
+  int attempt = 0;
+  while (attempt++ < 10) {
+    float area_ratio = RandRatio(min_area_ratio, max_area_ratio, rand_num_);
+    float aspect_ratio_change =
+      RandRatio(min_aspect_ratio_change, 1 / min_aspect_ratio_change, rand_num_);
+    float new_area = area_ratio * area;
+    int new_h = int(sqrt(new_area) * aspect_ratio_change);
+    int new_w = int(sqrt(new_area) / aspect_ratio_change);
+    if (RandRatio(0, 1, rand_num_) < 0.5) {
+      int tmp = new_h; new_h = new_w; new_w = tmp;
+    }
+    if (new_h <= h && new_w <= w) {
+      int y = rand_num_(h - new_h + 1);
+      int x = rand_num_(w - new_w + 1);
+      cv::Rect roi(x, y, new_w, new_h);
+      cv::Mat croppedImg = img(roi);
+      resize_param.set_height(crop_size);
+      resize_param.set_width(crop_size);
+      *resized_img = ApplyResize(croppedImg, resize_param);
+      return;
+    }
+  }
+  *resized_img = ResizeImagePerShorterSize(img, crop_size, resize_param);
+}
+
 #endif  // USE_OPENCV
 
 template<typename Dtype>
@@ -1186,8 +1444,13 @@ vector<int> DataTransformer<Dtype>::InferBlobShape(const cv::Mat& cv_img) {
   int img_width = cv_img.cols;
   // Check dimensions.
   CHECK_GT(img_channels, 0);
-  CHECK_GE(img_height, crop_size);
-  CHECK_GE(img_width, crop_size);
+
+  if (param_.has_random_resize_param() || param_.has_random_aspect_ratio_param()) {
+    CHECK_GT(crop_size, 0);
+  } else {
+    CHECK_GE(img_height, crop_size);
+    CHECK_GE(img_width, crop_size);
+  }
 
   if (param_.has_resize_param()) {
     InferNewSize(param_.resize_param(), img_width, img_height,
@@ -1219,11 +1482,21 @@ vector<int> DataTransformer<Dtype>::InferBlobShape(
 template <typename Dtype>
 void DataTransformer<Dtype>::InitRand() {
   const bool needs_rand = param_.mirror() ||
+      param_.has_random_resize_param() ||
+      param_.has_random_aspect_ratio_param() ||
       (phase_ == TRAIN && param_.crop_size());
+
   if (needs_rand) {
     rand_num_.Init();
   } else {
     rand_num_.Reset();
+  }
+}
+
+template <typename Dtype>
+void DataTransformer<Dtype>::ReinitRand() {
+  if (rand_num_.IsEmpty()) {
+    rand_num_.Init();
   }
 }
 

@@ -129,6 +129,7 @@ class DataReader {
 
     const LayerParameter param_;
     BlockingQueue<shared_ptr<QueuePair> > new_queue_pairs_;
+    bool first_read_;
 
     friend class DataReader;
 
@@ -144,7 +145,7 @@ class DataReader {
   const shared_ptr<QueuePair> queue_pair_;
   shared_ptr<Body> body_;
 
-  static map<const string, boost::weak_ptr<DataReader::Body> > bodies_;
+  map<const string, boost::weak_ptr<DataReader::Body> > bodies_;
 
 DISABLE_COPY_AND_ASSIGN(DataReader);
 };

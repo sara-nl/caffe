@@ -1,7 +1,12 @@
 FROM centos:7
 MAINTAINER caffe-maint@googlegroups.com
 
-RUN rpm -iUvh http://download.fedoraproject.org/pub/epel/7/x86_64/e/epel-release-7-8.noarch.rpm
+#ENV http_proxy proxy:port
+#ENV https_proxy proxy:port
+
+RUN rpm -iUvh http://download.fedoraproject.org/pub/epel/7/x86_64/e/epel-release-7-10.noarch.rpm
+
+RUN yum upgrade -y
 
 RUN yum install -y \
         redhat-rpm-config \
@@ -12,6 +17,7 @@ RUN yum install -y \
         cmake \
         git \
         wget \
+        ssh \
         atlas-devel \
         boost-devel \
         gflags-devel \
@@ -42,7 +48,7 @@ ENV CLONE_TAG=master
 RUN git clone -b ${CLONE_TAG} --depth 1 https://github.com/intel/caffe.git . && \
     for req in $(cat python/requirements.txt) pydot; do pip --no-cache-dir install $req; done && \
     mkdir build && cd build && \
-    cmake -DCPU_ONLY=1  -DUSE_MKL2017_AS_DEFAULT_ENGINE=1 -DCMAKE_BUILD_TYPE=Release .. && \
+    cmake -DCPU_ONLY=1 -DCMAKE_BUILD_TYPE=Release .. && \
     make all -j"$(nproc)"
 
 ENV PYCAFFE_ROOT $CAFFE_ROOT/python

@@ -78,8 +78,8 @@ void LRNLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
     LayerParameter pool_param;
     pool_param.mutable_pooling_param()->set_pool(
         PoolingParameter_PoolMethod_AVE);
-    pool_param.mutable_pooling_param()->set_pad(pre_pad_);
-    pool_param.mutable_pooling_param()->set_kernel_size(size_);
+    pool_param.mutable_pooling_param()->add_pad(pre_pad_);
+    pool_param.mutable_pooling_param()->add_kernel_size(size_);
     pool_layer_.reset(new PoolingLayer<Dtype>(pool_param));
     pool_layer_->SetUp(square_top_vec_, pool_top_vec_);
     // Set up power_layer_ to compute (1 + alpha_/N^2 s)^-beta_, where s is
@@ -103,26 +103,6 @@ void LRNLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
     product_layer_.reset(new EltwiseLayer<Dtype>(product_param));
     product_layer_->SetUp(product_bottom_vec_, top);
   }
-#ifdef USE_MLSL
-  int ic = bottom[0]->channels();
-  int iw = bottom[0]->width();
-  int ih = bottom[0]->height();
-
-  int oc = ic;
-  int ow = iw;
-  int oh = ih;
-
-  DataType dt = (sizeof(Dtype) == 4)? DT_FLOAT : DT_DOUBLE;
-	ComputeOpRegInfo *myRegInfo;
-	myRegInfo = new ComputeOpRegInfo(COMP_OP_TYPE_POOL);
-  myRegInfo->SetName(this->layer_param_.name().c_str());
-	myRegInfo->AddInputFeatureMap(ic, iw*ih, dt);
-	myRegInfo->AddOutputFeatureMap(oc, ow*oh, dt);
-
-  myRegInfo->Validate();
-	this->layerOp = new ComputeOp(myRegInfo, caffe::internode::data_parallelism);
-  delete myRegInfo;
-#endif
 }
 
 template <typename Dtype>

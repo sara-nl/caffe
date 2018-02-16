@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "caffe/common.hpp"
 #include "caffe/util/math_functions.hpp"
 #include "mkldnn.hpp"
+#include "caffe/quant/base_quant_layer.hpp"
 
 using namespace mkldnn;
 
@@ -149,8 +150,9 @@ public:
             // !! TODO: change below if stream will have method to reset its state
             VLOG(1) << typeid(*this).name()<< " : " << __FUNCTION__ << " : create new stream";
 //            _stream.reset(new stream(stream::kind::any));
-            //_stream.reset(new stream(stream::kind::eager));
-            _stream.reset(new stream(stream::kind::lazy));
+            _stream.reset(new stream(stream::kind::eager));
+            // TODO: Enable when Unit tests work for this one
+            //_stream.reset(new stream(stream::kind::lazy));
         }
         _ready = true;
     }
@@ -191,10 +193,12 @@ private:
 
 // =====  MKLDNNLayer =======================================
 template <typename Dtype>
-class MKLDNNLayer {
+class MKLDNNLayer : public BaseQuantLayer<Dtype> {
 public:
-    explicit MKLDNNLayer() {}
+    explicit MKLDNNLayer(const LayerParameter &param);
     virtual ~MKLDNNLayer() {}
+protected:
+    bool reshape;
 };
 
 // =====  MKLDNNPrimitive =======================================
@@ -202,6 +206,10 @@ template <typename Dtype>
 class MKLDNNPrimitive {
 public:
     explicit MKLDNNPrimitive():aprimitive(), mkldnn_stream() {}
+
+    //API for initializing with shared_ptr<primitive>
+    MKLDNNPrimitive(shared_ptr<primitive> aprimitive_input) {this->aprimitive = aprimitive_input;}
+
     virtual ~MKLDNNPrimitive() {}
     void reset(primitive* pprimitive) { this->aprimitive.reset(pprimitive);}
     shared_ptr<primitive> aprimitive;

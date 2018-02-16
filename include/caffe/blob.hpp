@@ -61,11 +61,7 @@ template <typename Dtype>
 class Blob {
  public:
   Blob()
-#ifdef DISTR_WEIGHT_UPDATE
-       : data_(), diff_(), count_(0), capacity_(0), owned_count_(0), owned_offset_(0) {}
-#else
        : data_(), diff_(), count_(0), capacity_(0) {}
-#endif
 
   /// @brief Deprecated; use <code>Blob(const vector<int>& shape)</code>.
   explicit Blob(const int num, const int channels, const int height,
@@ -89,7 +85,7 @@ class Blob {
    * an error; either Net::Forward or Net::Reshape need to be called to
    * propagate the new input shape to higher layers.
    */
-  void Reshape(const vector<int>& shape);
+  void Reshape(const vector<int>& shape, bool reinitialize = true);
   void Reshape(const BlobShape& shape);
   void ReshapeLike(const Blob& other);
   inline string shape_string() const {
@@ -113,27 +109,7 @@ class Blob {
     return shape_[CanonicalAxisIndex(index)];
   }
   inline int num_axes() const { return shape_.size(); }
-  inline int count() const { return count_; }
-
-#ifdef DISTR_WEIGHT_UPDATE
-
-  inline void set_owned_count(int owned_count) {
-    owned_count_ = owned_count;
-  }
-
-  inline void set_owned_offset(int owned_offset) {
-    owned_offset_ = owned_offset;
-  }
-
-  inline int owned_count() const {
-    return owned_count_;
-  }
-
-  inline int owned_offset() const {
-    return owned_offset_;
-  }
-
-#endif /* DISTR_WEIGHT_UPDATE */
+  inline long count() const { return count_; }
 
   /**
    * @brief Compute the volume of a slice; i.e., the product of dimensions
@@ -356,14 +332,8 @@ class Blob {
   shared_ptr<SyncedMemory> shape_data_;
 #endif
   vector<int> shape_;
-  int count_;
-  int capacity_;
-
-#ifdef DISTR_WEIGHT_UPDATE
-  /* for distributed weight update */
-  int owned_count_;
-  int owned_offset_;
-#endif
+  long count_;
+  long capacity_;
 
   DISABLE_COPY_AND_ASSIGN(Blob);
 };  // class Blob

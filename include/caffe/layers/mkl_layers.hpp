@@ -46,11 +46,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "caffe/common.hpp"
 #include "caffe/layers/base_conv_layer.hpp"
 #include "caffe/layers/conv_layer.hpp"
+#include "caffe/layers/deconv_layer.hpp"
 #include "caffe/layers/neuron_layer.hpp"
 #include "caffe/proto/caffe.pb.h"
 
 #include "caffe/mkl_memory.hpp"
 #include "mkl_dnn_cppwrapper.h"
+
+#include "caffe/util/performance.hpp"
 
 namespace caffe {
 
@@ -85,15 +88,12 @@ class MKLConvolutionLayer : public ConvolutionLayer<Dtype> {
   void Reshape(const vector<Blob<Dtype>*>& bottom,
           const vector<Blob<Dtype>*>& top);
 
+  void CreateFwdPrimitive();
+  void CreateBwdDataPrimitive();
+  void CreateBwdFilterPrimitive();
+  void CreateBwdBiasPrimitive();
+
  private:
-
-
-#ifdef USE_MLSL
-  virtual void pack_buffer(MLSL::FeatureMap *fm, Dtype *to, const Dtype *from);
-  virtual void unpack_buffer(MLSL::FeatureMap *fm, const Dtype *from, Dtype *to);
-#endif /* USE_MLSL */
-
-
   /* Fwd step */
   shared_ptr<MKLData<Dtype> > fwd_bottom_data, fwd_top_data, fwd_filter_data,
                                  fwd_bias_data;
@@ -131,9 +131,109 @@ class MKLConvolutionLayer : public ConvolutionLayer<Dtype> {
          pad_h_;
 
   bool bprop_unpack_called;
+
+  // for reshape
+  bool reshape;
+  
+  size_t bdata_sizes[4];
+  size_t bdata_strides[4];
+
+  size_t f_dimension;
+  size_t fdata_sizes[5];
+  size_t fdata_strides[5];
+
+  size_t bias_sizes[1];
+  size_t bias_strides[1];
+
+  size_t tdata_sizes[4];
+  size_t tdata_strides[4];
+
+  size_t convolutionStrides[2];
+  int    inputOffset[2];
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_prop_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_diff_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_bias_);
 };
 
+template <typename Dtype>
+class MKLDeconvolutionLayer : public DeconvolutionLayer<Dtype> {
+ public:
+  explicit MKLDeconvolutionLayer(const LayerParameter& param);
 
+  virtual ~MKLDeconvolutionLayer();
+
+  virtual inline const char* type() const { return "MklDeconvolution"; }
+
+ protected:
+  virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
+                           const vector<Blob<Dtype>*>& top);
+  virtual void Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+                           const vector<Blob<Dtype>*>& top);
+  virtual void Backward_cpu(const vector<Blob<Dtype>*>& top,
+                            const vector<bool>& propagate_down,
+                            const vector<Blob<Dtype>*>& bottom);
+  virtual void Backward_gpu(const vector<Blob<Dtype>*>& top,
+                            const vector<bool>& propagate_down,
+                            const vector<Blob<Dtype>*>& bottom);
+  // Customized methods
+  void Init(const vector<Blob<Dtype>*>& bottom,
+            const vector<Blob<Dtype>*>& top);
+
+  virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
+                          const vector<Blob<Dtype>*>& top);
+  virtual void compute_output_shape();
+
+  void Reshape(const vector<Blob<Dtype>*>& bottom,
+          const vector<Blob<Dtype>*>& top);
+
+ private:
+  /* Fwd step */
+  shared_ptr<MKLData<Dtype> > fwd_bottom_data, fwd_top_data, fwd_filter_data,
+                                 fwd_bias_data;
+  dnnPrimitive_t convolutionFwd;
+
+  /* Bwd data step */
+  shared_ptr<MKLDiff<Dtype> > bwdd_top_diff, bwdd_bottom_diff;
+  shared_ptr<MKLData<Dtype> > bwdd_filter_data;
+  dnnPrimitive_t convolutionBwdData;
+
+  /* Bwd filter step */
+  shared_ptr<MKLDiff<Dtype> > bwdf_top_diff, bwdf_filter_diff;
+  shared_ptr<MKLDiff<Dtype> > bwdf2fwd_filter_diff;
+  shared_ptr<MKLData<Dtype> > bwdf_bottom_data;
+  dnnPrimitive_t convolutionBwdFilter;
+
+  /* Bwd bias step */
+  shared_ptr<MKLDiff<Dtype> > bwdb_top_diff, bwdb_bias_diff;
+  dnnPrimitive_t convolutionBwdBias;
+
+  /* In case of (iter_size > 1) we need additional buffers */
+  shared_ptr<MKLDiff<Dtype> > bwdf_filter_diff_iter,
+                              bwdb_bias_diff_iter;
+
+  // TODO: temp. compatibility vs. older cafe
+  size_t width_,
+         height_,
+         width_out_,
+         height_out_,
+         kernel_w_,
+         kernel_h_,
+         stride_w_,
+         stride_h_;
+  int    pad_w_,
+         pad_h_;
+
+  bool bprop_unpack_called;
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_prop_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_diff_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_bias_);
+};
 /**
  * @brief Normalize the input in a local region across feature maps.
  */
@@ -149,7 +249,10 @@ class MKLLRNLayer : public Layer<Dtype> {
         fwd_bottom_data (new MKLData<Dtype>()),
         bwd_top_diff    (new MKLDiff<Dtype>()),
         bwd_bottom_diff (new MKLDiff<Dtype>()),
-        lrn_buffer_(static_cast<Dtype*>(NULL)) {}
+        lrn_buffer_(static_cast<Dtype*>(NULL)) {
+          PERFORMANCE_EVENT_ID_RESET(perf_id_fw_);
+          PERFORMANCE_EVENT_ID_RESET(perf_id_bw_);
+        }
   virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top);
   virtual void Reshape(const vector<Blob<Dtype>*>& bottom,
@@ -159,11 +262,6 @@ class MKLLRNLayer : public Layer<Dtype> {
   virtual inline const char* type() const { return "LRN"; }
   virtual inline int ExactNumBottomBlobs() const { return 1; }
   virtual inline int ExactNumTopBlobs() const { return 1; }
-
-#ifdef USE_MLSL
-  virtual void pack_buffer(MLSL::FeatureMap *fm, Dtype *to, const Dtype *from);
-  virtual void unpack_buffer(MLSL::FeatureMap *fm, const Dtype *from, Dtype *to);
-#endif
 
  protected:
   virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
@@ -205,6 +303,9 @@ class MKLLRNLayer : public Layer<Dtype> {
   shared_ptr<MKLData<Dtype> > fwd_top_data, fwd_bottom_data;
   shared_ptr<MKLDiff<Dtype> > bwd_top_diff, bwd_bottom_diff;
   Dtype *lrn_buffer_;
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_);
 };
 
 
@@ -218,7 +319,10 @@ class MKLPoolingLayer : public Layer<Dtype> {
       fwd_bottom_data (new MKLData<Dtype>()),
       bwd_top_diff    (new MKLDiff<Dtype>()),
       bwd_bottom_diff (new MKLDiff<Dtype>()),
-      poolingFwd(NULL), poolingBwd(NULL) {}
+      poolingFwd(NULL), poolingBwd(NULL) {
+        PERFORMANCE_EVENT_ID_RESET(perf_id_fw_);
+        PERFORMANCE_EVENT_ID_RESET(perf_id_bw_);
+      }
   ~MKLPoolingLayer();
   virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
                           const vector<Blob<Dtype>*>& top);
@@ -237,11 +341,6 @@ class MKLPoolingLayer : public Layer<Dtype> {
     return (this->layer_param_.pooling_param().pool() ==
             PoolingParameter_PoolMethod_MAX) ? 2 : 1;
   }
-
-#ifdef USE_MLSL
-  virtual void pack_buffer(MLSL::FeatureMap *fm, Dtype *to, const Dtype *from);
-  virtual void unpack_buffer(MLSL::FeatureMap *fm, const Dtype *from, Dtype *to);
-#endif /* USE_MLSL */
 
  protected:
   virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
@@ -262,6 +361,7 @@ class MKLPoolingLayer : public Layer<Dtype> {
   int height_, width_;
   int pooled_height_, pooled_width_;
   bool global_pooling_;
+  dnnAlgorithm_t algorithm;
   Blob<Dtype> rand_idx_;
   Blob<size_t> max_idx_;
 
@@ -273,6 +373,13 @@ class MKLPoolingLayer : public Layer<Dtype> {
   shared_ptr<MKLDiff<Dtype> > bwd_top_diff, bwd_bottom_diff;
 
   dnnPrimitive_t poolingFwd, poolingBwd;
+  bool   reshape;
+  size_t dim;
+  size_t src_sizes[4], src_strides[4];
+  size_t dst_sizes[4], dst_strides[4];
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_);
 };
 
 template <typename Dtype>
@@ -291,7 +398,10 @@ class MKLReLULayer : public NeuronLayer<Dtype> {
       bwd_top_diff_    (new MKLDiff<Dtype>()),
       bwd_bottom_diff_ (new MKLDiff<Dtype>()),
       reluFwd_(NULL),
-      reluBwd_(NULL) {}
+      reluBwd_(NULL) {
+        PERFORMANCE_EVENT_ID_RESET(perf_id_fw_);
+        PERFORMANCE_EVENT_ID_RESET(perf_id_bw_);
+      }
 
   ~MKLReLULayer();
 
@@ -305,16 +415,6 @@ class MKLReLULayer : public NeuronLayer<Dtype> {
             const vector<Blob<Dtype>*>& top);
 
   virtual inline const char* type() const { return "ReLU"; }
-
-#ifdef USE_MLSL
-  virtual void pack_buffer(MLSL::FeatureMap *fm, Dtype *to, const Dtype *from);
-  virtual void unpack_buffer(MLSL::FeatureMap *fm, const Dtype *from, Dtype *to);
-
-#ifdef CAFFE_MLSL_OWN_BUFFERS
-  virtual void out_layout(MLSL::FeatureMap *fm, Dtype *to, const Dtype *from);
-  virtual void in_layout(MLSL::FeatureMap *fm, const Dtype *from, Dtype *to);
-#endif
-#endif /* USE_MLSL */
 
  protected:
   virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
@@ -337,6 +437,11 @@ class MKLReLULayer : public NeuronLayer<Dtype> {
   dnnPrimitive_t reluFwd_, reluBwd_;
   vector<size_t> sizes_;
   vector<size_t> strides_;
+  bool           reshape;
+  size_t         dim;
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_);
 };
 
 template <typename Dtype>
@@ -348,18 +453,16 @@ class MKLConcatLayer : public Layer<Dtype> {
         concatBwd_(static_cast<dnnPrimitive_t>(NULL)),
         fwd_top_data_(new MKLData<Dtype>()),
         bwd_top_diff_(new MKLDiff<Dtype>()),
-        split_channels_(NULL) {}
+        split_channels_(NULL) {
+          PERFORMANCE_EVENT_ID_RESET(perf_id_fw_);
+          PERFORMANCE_EVENT_ID_RESET(perf_id_bw_);
+        }
   virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
                           const vector<Blob<Dtype>*>& top);
   virtual void Reshape(const vector<Blob<Dtype>*>& bottom,
                        const vector<Blob<Dtype>*>& top);
   virtual inline const char* type() const { return "Concat"; }
   ~MKLConcatLayer();
-
-#ifdef USE_MLSL
-  virtual void pack_buffer(MLSL::FeatureMap *fm, Dtype *to, const Dtype *from);
-  virtual void unpack_buffer(MLSL::FeatureMap *fm, const Dtype *from, Dtype *to);
-#endif
 
  protected:
   virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
@@ -391,6 +494,9 @@ class MKLConcatLayer : public Layer<Dtype> {
   size_t channels_;
   size_t num_;
   size_t num_concats_;
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_);
 };
 
 template <typename Dtype>
@@ -405,13 +511,17 @@ class MKLBatchNormLayer : public Layer<Dtype> {
         batchNormFwd(static_cast<dnnPrimitive_t>(NULL)),
         batchNormFwdInference(static_cast<dnnPrimitive_t>(NULL)),
         batchNormBwd(static_cast<dnnPrimitive_t>(NULL)),
-        mean_buffer_(static_cast<Dtype*>(NULL)),
-        variance_buffer_(static_cast<Dtype*>(NULL)),
         scaleShift_buffer_(static_cast<Dtype*>(NULL)),
         diffScaleShift_buffer_(static_cast<Dtype*>(NULL)),
         layout_usr_(static_cast<dnnLayout_t>(NULL)),
-        use_global_stats_(false)
-      {}
+        num_stats_batches_(1),
+        stats_batch_size_(0)      {
+        blobs_initialized_ = false;
+        use_global_stats_ = false;
+
+        PERFORMANCE_EVENT_ID_RESET(perf_id_fw_);
+        PERFORMANCE_EVENT_ID_RESET(perf_id_bw_);
+      }
 
   virtual ~MKLBatchNormLayer();
   virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
@@ -422,6 +532,9 @@ class MKLBatchNormLayer : public Layer<Dtype> {
   virtual inline const char* type() const { return "BatchNorm"; }
   virtual inline int ExactNumBottomBlobs() const { return 1; }
   virtual inline int ExactNumTopBlobs() const { return 1; }
+#ifdef USE_MLSL
+  virtual bool ParamNeedReduce(int param_id) { return param_id >= 3; }
+#endif
 
  protected:
   virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
@@ -432,6 +545,12 @@ class MKLBatchNormLayer : public Layer<Dtype> {
       const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom);
   virtual void Backward_gpu(const vector<Blob<Dtype>*>& top,
      const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom);
+
+  void ForwardStatsBatch_cpu(const vector<Blob<Dtype>*>& bottom,
+      const vector<Blob<Dtype>*>& top, int stats_batch_idx);
+  void BackwardStatsBatch_cpu(const vector<Blob<Dtype>*>& top,
+      const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom,
+      int stats_batch_idx);
 
   void Init(const vector<Blob<Dtype>*>& bottom,
             const vector<Blob<Dtype>*>& top);
@@ -452,12 +571,19 @@ class MKLBatchNormLayer : public Layer<Dtype> {
   shared_ptr<MKLDiff<Dtype> > bwd_bottom_diff;
   Blob<Dtype> temp_;
   dnnPrimitive_t batchNormFwd, batchNormFwdInference, batchNormBwd;
-  Dtype *mean_buffer_;
-  Dtype *variance_buffer_;
+  vector<Dtype *> mean_buffers_;
+  vector<Dtype *> variance_buffers_;
   Dtype *scaleShift_buffer_;
   Dtype *diffScaleShift_buffer_;
   dnnLayout_t layout_usr_;
   bool use_global_stats_;
+
+  bool blobs_initialized_;
+  int num_stats_batches_;
+  int stats_batch_size_;
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
+  PERFORMANCE_EVENT_ID_DECL(perf_id_bw_);
 };
 
 template <typename Dtype>
@@ -466,7 +592,9 @@ class MKLSplitLayer : public Layer<Dtype> {
   explicit MKLSplitLayer(const LayerParameter& param)
       : Layer<Dtype>(param),
         bwd_bottom_diff (new MKLDiff<Dtype>()),
-        sumPrimitive(static_cast<dnnPrimitive_t>(NULL)) {}
+        sumPrimitive(static_cast<dnnPrimitive_t>(NULL)) {
+          PERFORMANCE_EVENT_ID_RESET(perf_id_fw_);
+        }
 
   virtual ~MKLSplitLayer();
   virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
@@ -499,6 +627,8 @@ class MKLSplitLayer : public Layer<Dtype> {
   vector<size_t> sizes_src_;
   vector<size_t> strides_src_;
   dnnPrimitive_t sumPrimitive;
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
 };
 
 template <typename Dtype>
@@ -507,7 +637,9 @@ class MKLEltwiseLayer : public Layer<Dtype> {
   explicit MKLEltwiseLayer(const LayerParameter& param)
       : Layer<Dtype>(param),
         fwd_top_data       (new MKLData<Dtype>()),
-        sumPrimitive(static_cast<dnnPrimitive_t>(NULL)) {}
+        sumPrimitive(static_cast<dnnPrimitive_t>(NULL)) {
+          PERFORMANCE_EVENT_ID_RESET(perf_id_fw_);
+        }
 
   virtual ~MKLEltwiseLayer();
   virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
@@ -548,6 +680,8 @@ class MKLEltwiseLayer : public Layer<Dtype> {
   int height_, width_;
 
   bool stable_prod_grad_;
+
+  PERFORMANCE_EVENT_ID_DECL(perf_id_fw_);
 };
 
 }  // namespace caffe

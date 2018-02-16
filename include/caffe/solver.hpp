@@ -44,7 +44,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "caffe/net.hpp"
 #include "caffe/solver_factory.hpp"
 
-#include "caffe/util/benchmark.hpp"
 
 namespace caffe {
 
@@ -113,12 +112,20 @@ class Solver {
   }
   int iter() { return iter_; }
   void set_iter(int value) { iter_ = value; }
+  void increment_iter() { iter_++; }
 
   // Invoked at specific points during an iteration
   class Callback {
    protected:
     virtual void on_start() = 0;
     virtual void on_gradients_ready() = 0;
+
+#ifdef USE_MLSL
+    virtual void on_before_test() {}
+    virtual void on_after_test() {}
+    virtual void on_before_snapshot() {}
+    virtual void on_after_snapshot() {}
+#endif
 
     template <typename T>
     friend class Solver;
@@ -148,25 +155,10 @@ class Solver {
   // Make and apply the update value for the current iteration.
   virtual void ApplyUpdate() = 0;
   virtual void ApplyUpdate(int param_id) = 0;
+  // Print learning rate to logs
+  virtual void PrintLearningRate() = 0;
 
   void TestAll();
-
-
-#ifdef CAFFE_PER_LAYER_TIMINGS
-  /* Timers for performance measurements */
-  Timer timer;
-  std::vector<double> forward_time_per_layer;
-  std::vector<double> backward_time_per_layer;
-  std::vector<double> update_time_per_layer;
-
-  std::vector<double> forward_time_per_layer_total;
-  std::vector<double> backward_time_per_layer_total;
-  std::vector<double> update_time_per_layer_total;
-
-  void InitTimers();
-  void ResetTimers();
-  void PrintTimers(bool printTotal);
-#endif /* CAFFE_PER_LAYER_TIMINGS */
 
  protected:
   string SnapshotFilename(const string extension);

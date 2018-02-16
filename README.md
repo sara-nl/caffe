@@ -9,7 +9,7 @@ Check out the [project site](http://caffe.berkeleyvision.org) for all the detail
 - [DIY Deep Learning for Vision with Caffe](https://docs.google.com/presentation/d/1UeKXVgRvvxg9OUdh_UiC5G71UMscNPlvArsWER41PsU/edit#slide=id.p)
 - [Tutorial Documentation](http://caffe.berkeleyvision.org/tutorial/)
 - [BVLC reference models](http://caffe.berkeleyvision.org/model_zoo.html) and the [community model zoo](https://github.com/BVLC/caffe/wiki/Model-Zoo)
-- [Installation instructions](http://caffe.berkeleyvision.org/installation.html)
+- [Installation instructions](https://github.com/intel/caffe/wiki/Installation)
 
 and step-by-step examples.
 
@@ -26,6 +26,8 @@ This repository contains merged code issued as pull request to BVLC caffe writte
 [Wei Liu](http://www.cs.unc.edu/~wliu/), [Dragomir Anguelov](https://www.linkedin.com/in/dragomiranguelov), [Dumitru Erhan](http://research.google.com/pubs/DumitruErhan.html), [Christian Szegedy](http://research.google.com/pubs/ChristianSzegedy.html), [Scott Reed](http://www-personal.umich.edu/~reedscot/), [Cheng-Yang Fu](http://www.cs.unc.edu/~cyfu/), [Alexander C. Berg](http://acberg.com).
 
 Original branch can be found at https://github.com/weiliu89/caffe/tree/ssd.
+
+Read our [wiki page](https://github.com/intel/caffe/wiki/SSD:-Single-Shot-MultiBox-Detector) for more details.
 
 # Intel® Distribution of Caffe*
 This fork is dedicated to improving Caffe performance when running on CPU, in particular Intel® Xeon processors (HSW, BDW, Xeon Phi)
@@ -69,3 +71,6 @@ Please cite Caffe in your publications if it helps your research:
 
 ***
  *Other names and brands may be claimed as the property of others
+
+
+

@@ -57,7 +57,7 @@ void Blob<Dtype>::Reshape(const int num, const int channels, const int height,
 }
 
 template <typename Dtype>
-void Blob<Dtype>::Reshape(const vector<int>& shape) {
+void Blob<Dtype>::Reshape(const vector<int>& shape, bool reinitialize) {
   CHECK_LE(shape.size(), kMaxBlobAxes);
   count_ = 1;
   shape_.resize(shape.size());
@@ -72,7 +72,7 @@ void Blob<Dtype>::Reshape(const vector<int>& shape) {
   for (int i = 0; i < shape.size(); ++i) {
     CHECK_GE(shape[i], 0);
     if (count_ != 0) {
-      CHECK_LE(shape[i], INT_MAX / count_) << "blob size exceeds INT_MAX";
+      CHECK_LE(shape[i], LONG_MAX / count_) << "blob size exceeds LONG_MAX";
     }
     count_ *= shape[i];
     if (shape_[i] != shape[i]) {
@@ -84,8 +84,8 @@ void Blob<Dtype>::Reshape(const vector<int>& shape) {
 #endif
   }
   // We restart sync objects when there was change of shape
-  // requested count is bgger than current capacity
-  if ( (actual_reshaping == true) || (count_ > capacity_) ) {
+  // requested count is bigger than current capacity
+  if ( reinitialize && ((actual_reshaping == true) || (count_ > capacity_))) {
     capacity_ = count_;
     data_.reset(new SyncedMemory(capacity_ * sizeof(Dtype)));
     diff_.reset(new SyncedMemory(capacity_ * sizeof(Dtype)));
@@ -111,22 +111,14 @@ template <typename Dtype>
 Blob<Dtype>::Blob(const int num, const int channels, const int height,
     const int width)
   // capacity_ must be initialized before calling Reshape
-#ifdef DISTR_WEIGHT_UPDATE
-  : capacity_(0), owned_count_(0), owned_offset_(0) {
-#else
   : capacity_(0) {
-#endif
   Reshape(num, channels, height, width);
 }
 
 template <typename Dtype>
 Blob<Dtype>::Blob(const vector<int>& shape)
   // capacity_ must be initialized before calling Reshape
-#ifdef DISTR_WEIGHT_UPDATE
-  : capacity_(0), owned_count_(0), owned_offset_(0) {
-#else
   : capacity_(0) {
-#endif
 
   Reshape(shape);
 }
@@ -253,12 +245,18 @@ shared_ptr<PrvMemDescr> Blob<Dtype>::get_prv_diff_descriptor() {
 template <typename Dtype>
 void Blob<Dtype>::ShareData(const Blob& other) {
   CHECK_EQ(count_, other.count());
+  // Although the count is same, we have to forcedly sync data to cpu if shape is changed.
+  // This is used to avoid mismatch between cpu shape and prv data.
+  if(this->shape() != other.shape() && other.data()) other.data()->mutable_cpu_data();
   data_ = other.data();
 }
 
 template <typename Dtype>
 void Blob<Dtype>::ShareDiff(const Blob& other) {
   CHECK_EQ(count_, other.count());
+  // Although the count is same, we have to forcedly sync data to cpu if shape is changed.
+  // This is used to avoid mismatch between cpu shape and prv data.
+  if(this->shape() != other.shape() && other.diff()) other.diff()->mutable_cpu_data();
   diff_ = other.diff();
 }
 
@@ -275,8 +273,10 @@ void Blob<Dtype>::Update() {
   switch (data_->head()) {
   case SyncedMemory::SYNCED_PRV:
   case SyncedMemory::HEAD_AT_PRV:
-    if ((diff_->head() == SyncedMemory::SYNCED_PRV) ||
-        (diff_->head() == SyncedMemory::HEAD_AT_PRV)) {
+    if (((diff_->head() == SyncedMemory::SYNCED_PRV) ||
+         (diff_->head() == SyncedMemory::HEAD_AT_PRV)) &&
+        diff_->prv_data() &&
+        data_->prv_data()) {
       CHECK_EQ(true, get_prv_data_descriptor()->layout_compare(
                 get_prv_diff_descriptor()));
       caffe_axpy<Dtype>(prv_diff_count(), Dtype(-1),
@@ -326,8 +326,14 @@ Dtype Blob<Dtype>::asum_data() const {
   if (!data_) { return 0; }
   switch (data_->head()) {
   case SyncedMemory::SYNCED_PRV:
+      {
+        if (prv_data() == NULL)
+          return caffe_cpu_asum(count_, cpu_data());
+        else
+          return caffe_cpu_asum(prv_data_count(), prv_data());
+      }
   case SyncedMemory::HEAD_AT_PRV:
-    return caffe_cpu_asum( prv_data_count(), prv_data());
+    return caffe_cpu_asum(prv_data_count(), prv_data());
   case SyncedMemory::HEAD_AT_CPU:
     return caffe_cpu_asum(count_, cpu_data());
   case SyncedMemory::HEAD_AT_GPU:
@@ -370,7 +376,13 @@ Dtype Blob<Dtype>::asum_diff() const {
   switch (diff_->head()) {
   case SyncedMemory::SYNCED_PRV:
   case SyncedMemory::HEAD_AT_PRV:
-    return caffe_cpu_asum( prv_diff_count(), prv_diff());
+    {
+      if (prv_diff() == NULL) {
+        return caffe_cpu_asum(count_, cpu_diff());
+      }
+      else
+        return caffe_cpu_asum(prv_diff_count(), prv_diff());
+    }
   case SyncedMemory::HEAD_AT_CPU:
     return caffe_cpu_asum(count_, cpu_diff());
   case SyncedMemory::HEAD_AT_GPU:
@@ -416,7 +428,12 @@ Dtype Blob<Dtype>::sumsq_data() const {
   case SyncedMemory::SYNCED_PRV:
   case SyncedMemory::HEAD_AT_PRV:
       data = prv_data();
-      sumsq = caffe_cpu_dot(prv_data_count(), data, data);
+      if (data == NULL) {
+        data = cpu_data();
+        sumsq = caffe_cpu_dot(count_, data, data);
+      } else {
+        sumsq = caffe_cpu_dot(prv_data_count(), data, data);
+      }
       break;
   case SyncedMemory::HEAD_AT_CPU:
     data = cpu_data();
@@ -463,7 +480,12 @@ Dtype Blob<Dtype>::sumsq_diff() const {
   case SyncedMemory::SYNCED_PRV:
   case SyncedMemory::HEAD_AT_PRV:
       diff = prv_diff();
-      sumsq = caffe_cpu_dot(prv_diff_count(), diff, diff);
+      if (diff == NULL) {
+        diff = cpu_diff();
+        sumsq = caffe_cpu_dot(count_, diff, diff); 
+      } else {
+        sumsq = caffe_cpu_dot(prv_diff_count(), diff, diff);
+      }
       break;
   case SyncedMemory::HEAD_AT_CPU:
     diff = cpu_diff();
@@ -505,8 +527,13 @@ void Blob<Dtype>::scale_data(Dtype scale_factor) {
   switch (data_->head()) {
   case SyncedMemory::SYNCED_PRV:
   case SyncedMemory::HEAD_AT_PRV:
-      data = mutable_prv_data();
-      caffe_scal(prv_data_count(), scale_factor, data);
+      if (prv_data() == NULL) {
+        data = mutable_cpu_data();
+        caffe_scal(count_, scale_factor, data);
+      } else {
+        data = mutable_prv_data();
+        caffe_scal(prv_data_count(), scale_factor, data);
+      }
       break;
   case SyncedMemory::HEAD_AT_CPU:
     data = mutable_cpu_data();
@@ -547,8 +574,13 @@ void Blob<Dtype>::scale_diff(Dtype scale_factor) {
   switch (diff_->head()) {
   case SyncedMemory::SYNCED_PRV:
   case SyncedMemory::HEAD_AT_PRV:
-      diff = mutable_prv_diff();
-      caffe_scal(prv_diff_count(), scale_factor, diff);
+      if (prv_diff() == NULL) {
+        diff = mutable_cpu_diff();
+        caffe_scal(count_, scale_factor, diff);
+      } else {
+        diff = mutable_prv_diff();
+        caffe_scal(prv_diff_count(), scale_factor, diff);
+      }
       break;
   case SyncedMemory::HEAD_AT_CPU:
     diff = mutable_cpu_diff();

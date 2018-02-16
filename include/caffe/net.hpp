@@ -49,6 +49,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "caffe/layer.hpp"
 #include "caffe/proto/caffe.pb.h"
 
+#include "caffe/util/benchmark.hpp"
+
+
 namespace caffe {
 
 /**
@@ -236,6 +239,11 @@ class Net {
   inline const vector<string>& param_display_names() const {
     return param_display_names_;
   }
+
+  inline const pair<int, int>& param_layer_indices(int param_id) {
+    return param_layer_indices_[param_id];
+  }
+
   /// @brief Input and output blob numbers
   inline int num_inputs() const { return net_input_blobs_.size(); }
   inline int num_outputs() const { return net_output_blobs_.size(); }
@@ -299,16 +307,112 @@ class Net {
   static void CompilationRuleThree(const NetParameter& param,
                              NetParameter* param_compiled);
 
-
+  /**
+  * @brief This is rule analyze for conv/elt/relu fusion.
+  */
+  static void CompilationRuleFour(const NetParameter& param,
+                             NetParameter* param_compiled);
+  /**
+   * @brief If find "Conv--BN--Scale" in current network, merge BN and Scale layer into Convolution
+   * layers, this optimization only works in caffe TEST phase now.
+   */
 
   static void GetBlobConsumers(std::vector<const LayerParameter*> &cnsmer_blobs,
                                                 const string& blob_name_to_find,
                                                 const NetParameter& param,
                                                 int layer_id);
 
+  static void GetNeedToCancelInplaceLayers(
+      vector<vector<const LayerParameter*>>& layer_pairs,    
+      std::map<string, int>& specified_layer_blob_name_to_index,      
+      std::map<string, int>& inplace_blob_name_to_index,
+      vector<string>& each_blob_list,
+      const NetParameter& param);
+
+  static void ParseNetInplaceStatus(
+      std::map<string, int>& inplace_blob_name_to_index,
+      std::map<string, int>& specified_layer_blob_name_to_index,      
+      vector<vector<string>>& specified_layer_input_blob_names,
+      NetParameter* param, const string& specified_layer_type);
+
   /// @brief return whether NetState state meets NetStateRule rule
   static bool StateMeetsRule(const NetState& state, const NetStateRule& rule,
       const string& layer_name);
+  /**
+   * @brief Look at the layer activations and parameters to find the maximum
+   * absolute values. The following layers are considered: Convolution,
+   * InnerProduct.
+   *
+   * @param layer_name The layers that should be quantized to fixed point.
+   * @param max_in The highest layer input.
+   * @param max_out The highest layer output.
+   * @param max_param The highest layer parameter.
+   *
+   * For layer parameters, the biases are ignored.
+   */
+  void RangeInLayers(vector<string>* layer_name, vector<Dtype>* max_in,
+      vector<Dtype>* max_out, vector<vector<Dtype>>* max_param, string scaling);
+  /**
+   * @brief Find the maximum value in a blob.
+   */
+  vector<Dtype> FindMax(Blob<Dtype>* blob, bool is_single=true);
+  inline const map<string,int>& blob_names_index() const {
+    return blob_names_index_;
+  }
+
+#ifdef CAFFE_PER_LAYER_TIMINGS
+  /* Timers for performance measurements */
+  Timer timer;
+#ifdef FW_OVERLAP_OPT
+  Timer wait_timer;
+#endif
+  std::vector<double> forward_time_per_layer;
+  std::vector<double> backward_time_per_layer;
+  std::vector<double> update_time_per_layer;
+  double cleardiffs_time_per_iter;
+#ifdef USE_MLSL
+  std::vector<double> startcomm_time_per_layer;
+  std::vector<double> waitcomm_time_per_layer;
+
+  std::vector<double> startcomm_start_time_per_layer;
+  std::vector<double> waitcomm_start_time_per_layer;
+  std::vector<double> startcomm_stop_time_per_layer;
+  std::vector<double> waitcomm_stop_time_per_layer;
+
+#ifdef FW_OVERLAP_OPT
+  std::vector<double> first_waitcomm_start_time_per_layer;
+  std::vector<double> first_waitcomm_stop_time_per_layer;
+  std::vector<double> first_update_start_time_per_layer;
+  std::vector<double> first_update_stop_time_per_layer;
+#endif
+
+#endif
+
+  std::vector<double> forward_time_per_layer_total;
+  std::vector<double> backward_time_per_layer_total;
+  std::vector<double> update_time_per_layer_total;
+  double cleardiffs_time_per_iter_total;
+#ifdef USE_MLSL
+  std::vector<double> startcomm_time_per_layer_total;
+  std::vector<double> waitcomm_time_per_layer_total;
+#endif
+
+  std::vector<double> forward_start_time_per_layer;
+  std::vector<double> backward_start_time_per_layer;
+  std::vector<double> update_start_time_per_layer;
+
+  std::vector<double> forward_stop_time_per_layer;
+  std::vector<double> backward_stop_time_per_layer;
+  std::vector<double> update_stop_time_per_layer;
+
+  void InitTimers();
+  void ResetTimers();
+  void PrintTimers(bool printTotal);
+
+  void PrintPayloadSize();
+  void SaveTimeline();
+
+#endif /* CAFFE_PER_LAYER_TIMINGS */
 
  protected:
   // Helpers for Init.
@@ -330,9 +434,13 @@ class Net {
   void BackwardDebugInfo(const int layer_id);
   /// @brief Helper for displaying debug info in Update.
   void UpdateDebugInfo(const int param_id);
-
+  bool bn_scale_remove_;
+  bool bn_scale_merge_;
+  vector<string> kept_bn_layers_;
   /// @brief The network name
   string name_;
+  /// @brief The engine name
+  string engine_name_;
   /// @brief The phase: TRAIN or TEST
   Phase phase_;
   /// @brief Individual layers in the net
