@@ -1,4 +1,4 @@
-net: "models/intel_optimized_models/multinode/resnet_50_448nodes/train_val95.prototxt"
+net: "models/intel_optimized_models/multinode/resnet_50_448nodes/train_val_noaug.prototxt"
 display: 40
 # collapse base lr
 base_lr: 0.254

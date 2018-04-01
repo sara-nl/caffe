@@ -1,4 +1,4 @@
-net: "models/intel_optimized_models/multinode/resnet50_448nodes/train_val95.prototxt"
+net: "models/intel_optimized_models/multinode/resnet50_448nodes/train_val.prototxt"
 display: 40
 base_lr: 4.8
 lr_policy: "poly"
