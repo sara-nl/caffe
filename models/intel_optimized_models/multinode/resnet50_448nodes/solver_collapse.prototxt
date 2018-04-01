@@ -1,0 +1,12 @@
+net: "models/intel_optimized_models/multinode/resnet_50_448nodes/train_val95.prototxt"
+display: 40
+# collapse base lr
+base_lr: 0.254
+lr_policy: "poly"
+power: 2
+max_iter: 402
+momentum: 0.9
+weight_decay: 0.0001
+snapshot: 402
+snapshot_prefix: "/tmp/resnet_50_448nodes_coll"
+solver_mode: CPU
