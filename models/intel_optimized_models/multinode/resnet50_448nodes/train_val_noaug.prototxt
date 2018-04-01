@@ -16,10 +16,8 @@ layer {
     mean_value: 123
   }
   data_param {
-    #source: "examples/imagenet/ilsvrc12_train_lmdb"
     source: "/tmp/ilsvrc12_train_lmdb"
-    #source: "/scratch/04611/valeriuc/ilsvrc12_train_lmdb_striped_64"
-    batch_size: 32
+    batch_size: 16
     backend: LMDB
     prefetch: 2
     shuffle: true
