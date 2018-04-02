@@ -31,16 +31,16 @@ Training is performed in using several intermediary snapshots, explained in the 
 	result=$(head -n 1 hostfile)
 	scp $result:/tmp/resnet_50_64nodes_cyc1_iter_3750.caffemodel .
 
-	# re-warmup for 3 wpochs and then decrease LR poly with power 2
+	# re-warmup for 3 wpochs and then decrease LR poly with power 2 for 12 epochs
 	OMP_NUM_THREADS=22 KMP_AFFINITY="granularity=fine,compact,1,0"  mpiexec.hydra -PSM2 -l -n 128 -ppn 2 -f hostfile -genv OMP_NUM_THREADS 22  
 	-genv KMP_AFFINITY "granularity=fine,compact,1,0" ./build/tools/caffe train --solver=models/intel_optimized_models/multinode/resnet50_custom_lr/solver_cyc2.prototxt 
 	--weights=resnet_50_64nodes_cyc1_iter_3750.caffemodel
 
-        # get resulting model back from worker 0
+	# get resulting model back from worker 0
 	result=$(head -n 1 hostfile)
 	scp $result:/tmp/resnet_50_64nodes_cyc2_iter_4750.caffemodel .
 
-        # re-warmup for 3 wpochs and then decrease LR poly with power 2
+	# re-warmup for 3 wpochs and then decrease LR poly with power 2 for 12 epochs
 	OMP_NUM_THREADS=22 KMP_AFFINITY="granularity=fine,compact,1,0"  mpiexec.hydra -PSM2 -l -n 128 -ppn 2 -f hostfile -genv OMP_NUM_THREADS 22  
 	-genv KMP_AFFINITY "granularity=fine,compact,1,0"  ./build/tools/caffe train --solver=models/intel_optimized_models/multinode/resnet50_custom_lr/solver_cyc3.prototxt 
 	--weights=resnet_50_64nodes_cyc2_iter_4750.caffemodel
@@ -55,7 +55,7 @@ Training is performed in using several intermediary snapshots, explained in the 
 	--weights=resnet_50_64nodes_cyc3_iter_4750.caffemodel ; '
 
 
-        # get final model back from worker 0
+	# get final model back from worker 0
 	result=$(head -n 1 hostfile)
 	scp $result:/tmp/resnet_50_64nodes_cyc_collapse_iter_1560.caffemodel .
 
