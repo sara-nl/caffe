@@ -70,3 +70,6 @@ The resulting model(resnet50_64nodes_cyc_collapse_iter_1560.caffemodel) achieves
 	I0402 13:18:56.347950 30419 caffe.cpp:517] loss = 0.942313 (* 1 = 0.942313 loss)
 	I0402 13:18:56.347960 30419 caffe.cpp:517] loss3/top-1 = 0.762781
 	I0402 13:18:56.348022 30419 caffe.cpp:517] loss3/top-5 = 0.931862
+
+
+This methodology currently uses only 2 re-warmup cycles, but multiple can be employed. At the end of each cycle a final collapse can be performed, and the resulting models form a collapsed ensemble that improves validation accuracy further, similar to the experiments in the mentioned paper.
