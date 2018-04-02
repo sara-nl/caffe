@@ -327,6 +327,8 @@ message SolverParameter {
   // accumulate gradients over `iter_size` x `batch_size` instances
   optional int32 iter_size = 36 [default = 1];
 
+  optional int32 lr_iter = 52;
+  optional int32 fff = 53;
   // The learning rate decay policy. The currently implemented learning rate
   // policies are as follows:
   //    - fixed: always return base_lr.
