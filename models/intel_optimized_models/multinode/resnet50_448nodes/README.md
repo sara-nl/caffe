@@ -5,7 +5,7 @@ The training is performed in about 60 minutes. The training data is expected to 
 
 The training uses HW more efficiently by running 2 Caffe processes per node, achieving relatively high throughput with a batch size of 16 images per worker. This results in a global batch size of 14336.
 
-More details can be found in our paper: Scale out for large minibatch SGD: Residual network training on ImageNet-1K with improved accuracy and reduced time to train (https://arxiv.org/pdf/1711.04291.pdf)
+More details can be found in our paper: ** Scale out for large minibatch SGD: Residual network training on ImageNet-1K with improved accuracy and reduced time to train ** (https://arxiv.org/pdf/1711.04291.pdf)
 
 Training is performed in 2 parts:
 
