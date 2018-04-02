@@ -45,7 +45,7 @@ Training is performed in using several intermediary snapshots, explained in the 
 	-genv KMP_AFFINITY "granularity=fine,compact,1,0"  ./build/tools/caffe train --solver=models/intel_optimized_models/multinode/resnet50_custom_lr/solver_cyc3.prototxt 
 	--weights=resnet_50_64nodes_cyc2_iter_4750.caffemodel
 
-        # get resulting model back from worker 0
+	# get resulting model back from worker 0
 	result=$(head -n 1 hostfile)
 	scp $result:/tmp/resnet_50_64nodes_cyc3_iter_4750.caffemodel .
 	
