@@ -1,0 +1,14 @@
+net: "models/intel_optimized_models/multinode/resnet50_custom_lr/train_val.prototxt"
+display: 40
+base_lr: 1.6
+lr_policy: "poly_cyc"
+power: 1
+max_iter: 7800 # 25 epochs
+lr_iter: 18720
+warmup_iter: 1560 # 1281167 / 4096  * 5 epochs
+warmup_start_lr: 0.1
+momentum: 0.9
+weight_decay: 0.00005
+snapshot: 7800
+snapshot_prefix: "/tmp/resnet_50_64nodes_init"
+solver_mode: CPU

@@ -1,0 +1,12 @@
+net: "models/intel_optimized_models/multinode/resnet50_custom_lr/train_val_noaug.prototxt"
+display: 40
+# collapse base lr
+base_lr: 0.143
+lr_policy: "poly"
+power: 2
+max_iter: 1560
+momentum: 0.9
+weight_decay: 0.0002
+snapshot: 1560
+snapshot_prefix: "/tmp/resnet_50_64nodes_cyc_collapse"
+solver_mode: CPU
